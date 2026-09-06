@@ -1,0 +1,53 @@
+name: Research paid playlist work sample
+on:
+  push:
+    branches: [research/independent-cash-work]
+    paths: ['.github/workflows/research-tools-sample.yml']
+permissions: {}
+jobs:
+  read:
+    if: github.repository == 'geazy1/deanpierce.net'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Read public playlist and a bounded sample of public descriptions
+        run: |
+          python3 - <<'PY'
+          import json, re, time, urllib.request
+          def fetch(url):
+              req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0','Accept-Language':'en-US,en;q=0.9'})
+              with urllib.request.urlopen(req,timeout=20) as r: data=r.read(5_000_001)
+              if len(data)>5_000_000: raise RuntimeError('Response too large')
+              return data.decode('utf-8')
+          def object_after(text,key):
+              match=re.search(key,text)
+              if not match: return None
+              return json.JSONDecoder().raw_decode(text[match.end():].lstrip())[0]
+          url='https://www.youtube.com/playlist?list=PLJtitKU0CAehVwewqUdsYrDqg9Kp1jQvj'
+          raw=fetch(url)
+          data=object_after(raw,r'var ytInitialData\s*=\s*')
+          if data is None:
+              print('PLAYLIST_UNAVAILABLE: public page did not expose the playlist. No access restrictions bypassed.')
+              raise SystemExit(0)
+          entries=[]
+          def walk(o):
+              if isinstance(o,dict):
+                  if 'playlistVideoRenderer' in o:
+                      r=o['playlistVideoRenderer']; title=r.get('title',{})
+                      entries.append({'id':r.get('videoId'),'title':title.get('simpleText') or ''.join(x.get('text','') for x in title.get('runs',[]))})
+                  for v in o.values(): walk(v)
+              elif isinstance(o,list):
+                  for v in o: walk(v)
+          walk(data)
+          print('PLAYLIST_INITIAL_ENTRIES',json.dumps(entries),flush=True)
+          for item in entries[:6]:
+              if not item.get('id'): continue
+              time.sleep(1)
+              try:
+                  raw=fetch('https://www.youtube.com/watch?v='+item['id'])
+                  player=object_after(raw,r'var ytInitialPlayerResponse\s*=\s*')
+                  if player is None: print('VIDEO_UNAVAILABLE',item['id']); continue
+                  d=player.get('videoDetails',{})
+                  print('VERIFIED_PLAYLIST_VIDEO',json.dumps({k:d.get(k) for k in ['videoId','title','author','channelId','shortDescription','lengthSeconds']}),flush=True)
+              except Exception as exc: print('READ_FAILED',item['id'],type(exc).__name__,flush=True)
+          PY
