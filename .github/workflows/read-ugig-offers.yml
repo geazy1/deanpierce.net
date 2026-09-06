@@ -1,0 +1,37 @@
+name: Read public gig offers
+on:
+  push:
+    branches: [research/independent-cash-work]
+    paths: ['.github/workflows/read-ugig-offers.yml']
+permissions: {}
+jobs:
+  read:
+    if: github.repository == 'geazy1/deanpierce.net'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Read public task descriptions
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request, urllib.error
+          for path in ['/api/bounties','/api/gigs?listing_type=all','/skill.md']:
+              url='https://ugig.net'+path
+              print('SOURCE',url,flush=True)
+              try:
+                  req=urllib.request.Request(url,headers={'User-Agent':'paid-work-research','Accept':'application/json,text/markdown'})
+                  with urllib.request.urlopen(req,timeout=20) as r: data=r.read(1000001)
+                  assert len(data)<=1000000
+                  if path.endswith('.md'): print(data.decode()[:30000],flush=True); continue
+                  obj=json.loads(data)
+                  if isinstance(obj,dict):
+                      print('TOP_FIELDS',list(obj),flush=True)
+                      rows=next((v for v in obj.values() if isinstance(v,list)),[])
+                  else: rows=obj
+                  print('COUNT',len(rows),flush=True)
+                  allowed=['id','title','description','budget_min','budget_max','amount','reward','reward_amount','currency','status','listing_type','payment_coin','payment_method','deadline','created_at','updated_at','funded','escrow_status','requirements','skills']
+                  for row in rows:
+                      print(json.dumps({k:row[k] for k in allowed if k in row}),flush=True)
+                  if rows: print('ROW_FIELDS',list(rows[0]),flush=True)
+              except urllib.error.HTTPError as exc: print('HTTP',exc.code,flush=True)
+              except Exception as exc: print('ERROR',type(exc).__name__,flush=True)
+          PY
