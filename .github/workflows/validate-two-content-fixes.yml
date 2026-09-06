@@ -1,0 +1,106 @@
+name: Validate two content corrections
+on:
+  push:
+    branches: [ci/validate-two-content-fixes]
+permissions: {}
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fetch pinned public source and inspect existing reports
+        run: |
+          python3 - <<'PY'
+          import io, json, pathlib, tarfile, urllib.request
+          def read(url, limit=100000000):
+              req=urllib.request.Request(url,headers={'User-Agent':'content-correction-validation'})
+              with urllib.request.urlopen(req,timeout=60) as r: body=r.read(limit+1)
+              assert len(body)<=limit
+              return body
+          sha='27cea875448c284673037499ae75b185dd0357c1'
+          data=read(f'https://api.github.com/repos/pierce403/deanpierce.net/tarball/{sha}')
+          root=pathlib.Path('source'); root.mkdir()
+          with tarfile.open(fileobj=io.BytesIO(data),mode='r:gz') as a: a.extractall(root,filter='data')
+          roots=list(root.iterdir()); assert len(roots)==1
+          pathlib.Path('source-dir.txt').write_text(str(roots[0].resolve()))
+          for page in range(1,11):
+              issues=json.loads(read(f'https://api.github.com/repos/pierce403/deanpierce.net/issues?state=all&per_page=100&page={page}',5000000))
+              for issue in issues:
+                  text=(issue.get('body') or '')
+                  print('EXISTING:',issue['number'],issue['title'],issue['state'])
+                  for term in ('use level','user-level','zk-bounty.md','bullet list','list rendering'):
+                      if term in text.lower(): print('POSSIBLE DUPLICATE:',issue['number'],term,text[:2000])
+              if len(issues)<100: break
+          else: raise RuntimeError('Duplicate check pagination incomplete')
+          PY
+      - name: Install declared dependencies in an isolated environment
+        run: |
+          python3 -m venv /tmp/content-venv
+          /tmp/content-venv/bin/python -m pip install -q -r "$(cat source-dir.txt)/requirements.txt"
+      - name: Reproduce baseline, test each fix separately, and test both together
+        run: |
+          /tmp/content-venv/bin/python - <<'PY'
+          import hashlib, json, pathlib, subprocess, sys, tempfile
+          from html.parser import HTMLParser
+          root=pathlib.Path('source-dir.txt').read_text().strip(); root=pathlib.Path(root)
+          linux='docs/talks/lateral-movement-in-linux-environments.md'
+          zk='docs/projects/zk-bounty.md'
+          original={p:(root/p).read_bytes() for p in (linux,zk)}
+          def blob(data): return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          assert blob(original[linux])=='11df26dc7af479d85dd181da39dd1a520e97d7bf'
+          assert blob(original[zk])=='092e2707128c9bc378c5293bc0de4f8ec56de707'
+          assert original[linux].count(b'use level access')==1
+          corrected={linux:original[linux].replace(b'use level access',b'user-level access'),zk:original[zk]}
+          for old in (b'The ZK Bounty system enables:\n-',b'[Zero Knowledge VM Hijinks series](/talks/zero-knowledge-vm-hijinks/):\n-'):
+              assert corrected[zk].count(old)==1
+              corrected[zk]=corrected[zk].replace(old,old.replace(b'\n-',b'\n\n-'))
+          assert corrected[zk].split()==original[zk].split(),'Non-whitespace content changed'
+          assert len(corrected[zk])==len(original[zk])+2
+          print('CORRECTED_BLOBS',json.dumps({p:blob(v) for p,v in corrected.items()}),flush=True)
+          initial={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file()}
+          class Article(HTMLParser):
+              def __init__(self):
+                  super().__init__(); self.active=False; self.text=[]; self.lists=[]; self.item=None
+              def handle_starttag(self,tag,attrs):
+                  if tag=='article': self.active=True
+                  if not self.active: return
+                  if tag=='ul': self.lists.append([])
+                  if tag=='li': self.item=[]
+              def handle_endtag(self,tag):
+                  if tag=='li' and self.item is not None:
+                      self.lists[-1].append(' '.join(''.join(self.item).split())); self.item=None
+                  if tag=='article': self.active=False
+              def handle_data(self,text):
+                  if self.active:
+                      self.text.append(text)
+                      if self.item is not None: self.item.append(text)
+          def parse(path):
+              result=Article(); result.feed(path.read_text()); return result
+          expected=[[
+              'Proof of Exploitability: Researchers prove they have a working exploit without revealing it',
+              "Automated triage: ZK proofs verify the bug's validity programmatically",
+              'Private bug markets: Buyers can verify exploit authenticity before purchase',
+              'Self-healing software supply chains: Automated vulnerability discovery and remediation'],[
+              'ETH Portland 2023','BSides Portland 2023','Hushcon Seattle 2023']]
+          scenarios={'baseline':[], 'linux-only':[linux], 'zk-only':[zk], 'combined':[linux,zk]}
+          with tempfile.TemporaryDirectory() as temp:
+              for name,changed in scenarios.items():
+                  for p in original: (root/p).write_bytes(corrected[p] if p in changed else original[p])
+                  out=pathlib.Path(temp)/name
+                  subprocess.run([sys.executable,'-m','mkdocs','build','--strict','--site-dir',str(out)],cwd=root,check=True)
+                  l=parse(out/'talks/lateral-movement-in-linux-environments/index.html')
+                  z=parse(out/'projects/zk-bounty/index.html')
+                  text=''.join(l.text)
+                  if linux in changed:
+                      assert 'user-level access' in text and 'use level access' not in text
+                  else: assert 'use level access' in text and 'user-level access' not in text
+                  if zk in changed: assert z.lists==expected,(name,z.lists)
+                  else: assert z.lists==[],(name,z.lists)
+                  current={str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file()}
+                  assert current.keys()==initial.keys()
+                  changed_files=sorted(p for p in initial if initial[p]!=current[p])
+                  assert changed_files==sorted(changed),(name,changed_files)
+                  print('PASS:',name,'changed_files=',changed_files,'ZK lists=',[len(x) for x in z.lists],flush=True)
+          print('PASS: all four strict builds; original defects reproduced; each correction passes independently and together.',flush=True)
+          print('PASS: ZK fix preserves every non-whitespace byte sequence; Linux fix changes only the intended phrase.',flush=True)
+          PY
