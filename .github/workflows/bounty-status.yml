@@ -38,7 +38,29 @@ jobs:
           PY
       - name: Test monitor logic offline
         run: python3 /tmp/check_bounties.py --self-test
-      - name: Review current submission status
+      - name: Review all four correction submissions
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 /tmp/check_bounties.py
+        run: |
+          python3 - <<'PY'
+          import importlib.util
+          spec = importlib.util.spec_from_file_location('bounty_monitor', '/tmp/check_bounties.py')
+          monitor = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(monitor)
+          monitor.TRACKED.update({
+              5: {
+                  'sha': 'd681961ee9c6efde4ff5dd523e74968e1cecd1fe',
+                  'run': 34062335896,
+                  'file': 'docs/talks/lateral-movement-in-linux-environments.md',
+                  'blob': 'e194affd30139a21607422faab0774df809c473f',
+              },
+              6: {
+                  'sha': '2a36dabcb5362ce4bb54999f5cff6bf3e38e5a08',
+                  'run': 34062335896,
+                  'file': 'docs/projects/zk-bounty.md',
+                  'blob': '2b4ebb93b397c4e1163825fc9b0c30bb9ce0d423',
+              },
+          })
+          assert set(monitor.TRACKED) == {3, 4, 5, 6}
+          raise SystemExit(monitor.main())
+          PY
