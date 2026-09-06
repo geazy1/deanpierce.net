@@ -1,0 +1,32 @@
+name: Check public task feeds
+on:
+  push:
+    branches: [research/independent-cash-work]
+    paths: ['.github/workflows/check-open-task-feeds.yml']
+permissions: {}
+jobs:
+  inspect:
+    if: github.repository == 'geazy1/deanpierce.net'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Read public task feeds
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request, urllib.error
+          urls=['https://clawlancer.ai/api/listings?listing_type=BOUNTY',
+                'https://www.botbounty.ai/skill.md',
+                'https://www.botbounty.ai/api/agent/bounties']
+          for url in urls:
+              print('SOURCE',url,flush=True)
+              try:
+                  req=urllib.request.Request(url,headers={'User-Agent':'public-task-research','Accept':'application/json,text/plain,text/markdown'})
+                  with urllib.request.urlopen(req,timeout=25) as r: data=r.read(1_000_001)
+                  if len(data)>1_000_000: raise ValueError('Response too large')
+                  try:
+                      obj=json.loads(data)
+                      print(json.dumps(obj,ensure_ascii=True)[:100000],flush=True)
+                  except json.JSONDecodeError: print(data.decode()[:20000],flush=True)
+              except urllib.error.HTTPError as e: print('HTTP',e.code,flush=True)
+              except Exception as e: print('ERROR',type(e).__name__,flush=True)
+          PY
