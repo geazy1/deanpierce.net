@@ -1,0 +1,138 @@
+name: Validate palette label correction
+on:
+  push:
+    branches: [ci/validate-palette-labels]
+permissions: {}
+jobs:
+  strict-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Download pinned public source
+        run: |
+          python3 - <<'PY'
+          import io
+          import pathlib
+          import tarfile
+          import urllib.request
+          sha = '27cea875448c284673037499ae75b185dd0357c1'
+          request = urllib.request.Request(
+              f'https://api.github.com/repos/pierce403/deanpierce.net/tarball/{sha}',
+              headers={'User-Agent': 'palette-label-validation'})
+          with urllib.request.urlopen(request, timeout=60) as response:
+              data = response.read(100 * 1024 * 1024 + 1)
+          assert len(data) <= 100 * 1024 * 1024
+          source = pathlib.Path('source')
+          source.mkdir()
+          with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
+              archive.extractall(source, filter='data')
+          roots = list(source.iterdir())
+          assert len(roots) == 1 and roots[0].is_dir()
+          pathlib.Path('source-dir.txt').write_text(str(roots[0].resolve()))
+          PY
+      - name: Install documented build dependencies
+        run: |
+          python3 -m venv /tmp/palette-venv
+          /tmp/palette-venv/bin/python -m pip install -r "$(cat source-dir.txt)/requirements.txt"
+      - name: Reproduce incorrect labels, apply two-line fix, and validate generated HTML
+        run: |
+          /tmp/palette-venv/bin/python - <<'PY'
+          import copy
+          import difflib
+          import hashlib
+          import json
+          import pathlib
+          import subprocess
+          import sys
+          import tempfile
+          from html.parser import HTMLParser
+          import yaml
+
+          root = pathlib.Path('source-dir.txt').read_text().strip()
+          root = pathlib.Path(root)
+          config_path = root / 'mkdocs.yml'
+          original = config_path.read_bytes()
+
+          def blob_sha(data):
+              return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+
+          assert blob_sha(original) == 'c612c7c5086fd0f281be4e770230715691ce1d93'
+          before_config = yaml.safe_load(original)
+
+          class PaletteParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.inputs = {}
+                  self.labels = []
+              def handle_starttag(self, tag, attrs):
+                  attrs = dict(attrs)
+                  if tag == 'input' and attrs.get('name') == '__palette':
+                      self.inputs[attrs['id']] = attrs
+                  if tag == 'label' and attrs.get('for', '').startswith('__palette_'):
+                      self.labels.append(attrs)
+
+          def inspect(html):
+              parser = PaletteParser()
+              parser.feed(html)
+              rows = []
+              for label in parser.labels:
+                  target = parser.inputs[label['for']]
+                  scheme = target['data-md-color-scheme']
+                  expected = {'default': 'Switch to light mode', 'slate': 'Switch to dark mode'}[scheme]
+                  names = {key: label[key] for key in ('title', 'aria-label') if key in label}
+                  assert names, 'Palette label has no accessible name or tooltip'
+                  rows.append({'target': label['for'], 'destination': scheme,
+                               'names': names, 'expected': expected,
+                               'correct': all(name == expected for name in names.values())})
+              return rows
+
+          def build(destination):
+              subprocess.run([sys.executable, '-m', 'mkdocs', 'build', '--strict',
+                              '--site-dir', str(destination)], cwd=root, check=True)
+
+          with tempfile.TemporaryDirectory(prefix='palette-validation-') as temporary:
+              temporary = pathlib.Path(temporary)
+              before_site = temporary / 'before'
+              build(before_site)
+              before_rows = inspect((before_site / 'index.html').read_text())
+              print('BASELINE_PALETTE:', json.dumps(before_rows), flush=True)
+              assert len(before_rows) == 2
+              assert all(not row['correct'] for row in before_rows), 'Original error did not reproduce'
+
+              replacements = [
+                  (b'icon: material/brightness-4\n        name: Switch to dark mode',
+                   b'icon: material/brightness-4\n        name: Switch to light mode'),
+                  (b'icon: material/brightness-7\n        name: Switch to light mode',
+                   b'icon: material/brightness-7\n        name: Switch to dark mode'),
+              ]
+              corrected = original
+              for old, new in replacements:
+                  assert corrected.count(old) == 1
+                  corrected = corrected.replace(old, new)
+              after_config = yaml.safe_load(corrected)
+              expected_config = copy.deepcopy(before_config)
+              expected_config['theme']['palette'][0]['toggle']['name'] = 'Switch to light mode'
+              expected_config['theme']['palette'][1]['toggle']['name'] = 'Switch to dark mode'
+              assert after_config == expected_config, 'Unexpected configuration change'
+              assert after_config['theme']['palette'][0]['scheme'] == 'slate', 'Dark default changed'
+              config_path.write_bytes(corrected)
+              print('CORRECTED_BLOB:', blob_sha(corrected), flush=True)
+              print(''.join(difflib.unified_diff(original.decode().splitlines(True),
+                    corrected.decode().splitlines(True), fromfile='a/mkdocs.yml', tofile='b/mkdocs.yml')), flush=True)
+
+              after_site = temporary / 'after'
+              build(after_site)
+              after_rows = inspect((after_site / 'index.html').read_text())
+              print('CORRECTED_PALETTE:', json.dumps(after_rows), flush=True)
+              assert len(after_rows) == 2 and all(row['correct'] for row in after_rows)
+              checked_pages = 0
+              for page in sorted(after_site.rglob('*.html')):
+                  rows = inspect(page.read_text())
+                  if rows:
+                      assert len(rows) == 2 and all(row['correct'] for row in rows), str(page)
+                      checked_pages += 1
+              assert checked_pages > 1
+              print(f'PASS: palette label destinations verified on {checked_pages} generated HTML pages.', flush=True)
+              print('PASS: baseline reproduced both mislabeled controls; corrected strict build passed.', flush=True)
+              print('PASS: only the two toggle names changed; dark-first order, icons, navigation and all other config preserved.', flush=True)
+          PY
