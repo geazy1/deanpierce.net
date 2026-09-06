@@ -1,0 +1,64 @@
+name: Validate proposed Platypus correction
+
+on:
+  push:
+    branches:
+      - ci/validate-platypus-chronology
+
+permissions: {}
+
+jobs:
+  strict-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download pinned public source and apply the proposed correction
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import io
+          import pathlib
+          import tarfile
+          import urllib.request
+
+          sha = '27cea875448c284673037499ae75b185dd0357c1'
+          url = f'https://api.github.com/repos/pierce403/deanpierce.net/tarball/{sha}'
+          request = urllib.request.Request(url, headers={'User-Agent': 'documentation-correction-build'})
+          with urllib.request.urlopen(request, timeout=60) as response:
+              archive_bytes = response.read()
+          source = pathlib.Path('source')
+          source.mkdir()
+          with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode='r:gz') as archive:
+              archive.extractall(source, filter='data')
+          roots = list(source.iterdir())
+          assert len(roots) == 1 and roots[0].is_dir(), 'Unexpected archive layout'
+          root = roots[0]
+          path = root / 'docs/talks/platypus.md'
+          original = path.read_bytes()
+          blob = b'blob ' + str(len(original)).encode() + b'\0' + original
+          assert hashlib.sha1(blob).hexdigest() == 'bf4d1a384ce3ea0a26ac97401a99cfb681beb9f9'
+          old = b'Delivered at BSides Las Vegas Underground track the same morning as Silk Road got taken down. (2013)'
+          new = b'Presented on the Underground track at BSides Las Vegas (2013).'
+          assert original.count(old) == 1, 'Expected sentence not found exactly once'
+          corrected = original.replace(old, new)
+          path.write_bytes(corrected)
+          pathlib.Path('source-dir.txt').write_text(str(root.resolve()))
+          digest = hashlib.sha1(b'blob ' + str(len(corrected)).encode() + b'\0' + corrected).hexdigest()
+          print(f'Validated original blob; proposed corrected blob: {digest}')
+          print('Only docs/talks/platypus.md was modified in the downloaded source.')
+          PY
+      - name: Install documented dependencies and build strictly
+        run: |
+          python3 -m venv /tmp/chronology-docs-venv
+          source_dir="$(cat source-dir.txt)"
+          /tmp/chronology-docs-venv/bin/python -m pip install -r "$source_dir/requirements.txt"
+          cd "$source_dir"
+          /tmp/chronology-docs-venv/bin/mkdocs build --strict
+          /tmp/chronology-docs-venv/bin/python - <<'PY'
+          from pathlib import Path
+          html = Path('site/talks/platypus/index.html').read_text()
+          assert 'Presented on the Underground track at BSides Las Vegas (2013).' in html
+          assert 'the same morning as Silk Road got taken down' not in html
+          print('PASS: corrected sentence appears in rendered HTML; conflicting sentence absent.')
+          PY
+          /tmp/chronology-docs-venv/bin/python -m pip freeze
