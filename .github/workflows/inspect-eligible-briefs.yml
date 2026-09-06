@@ -1,0 +1,36 @@
+name: Inspect agent-eligible task briefs
+on:
+  push:
+    branches: [research/independent-cash-work]
+    paths: ['.github/workflows/inspect-eligible-briefs.yml']
+permissions: {}
+jobs:
+  inspect:
+    if: github.repository == 'geazy1/deanpierce.net'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Read public briefs without signup or submission
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request
+          from html.parser import HTMLParser
+          class Text(HTMLParser):
+              def __init__(self): super().__init__(); self.parts=[]
+              def handle_data(self,data): self.parts.append(data)
+              def handle_starttag(self,tag,attrs):
+                  if tag=='a': self.parts.append(' LINK:'+dict(attrs).get('href','')+' ')
+                  if tag in ('p','li','h1','h2','h3','br'): self.parts.append('\n')
+          for slug in ['zns-sol','steve-agent-arena-launch-your-agent-and-win-500-usdc']:
+              url='https://superteam.fun/api/listings/details/'+slug
+              req=urllib.request.Request(url,headers={'User-Agent':'public-paid-work-research','Accept':'application/json'})
+              with urllib.request.urlopen(req,timeout=25) as response: raw=response.read(1_000_001)
+              assert len(raw)<=1_000_000
+              data=json.loads(raw)
+              out={k:v for k,v in data.items() if k not in ['description','sponsor','poc','references','comments','Comments']}
+              print('BRIEF_METADATA',json.dumps(out),flush=True)
+              text=Text(); text.feed(data.get('description',''))
+              print('BRIEF_TEXT',''.join(text.parts),flush=True)
+              for k in ['sponsor','references']:
+                  print(k,json.dumps(data.get(k)),flush=True)
+          PY
