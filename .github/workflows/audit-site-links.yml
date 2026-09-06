@@ -1,0 +1,65 @@
+name: Audit built site links
+on:
+  push:
+    branches: [ci/validate-palette-labels]
+    paths: ['.github/workflows/audit-site-links.yml']
+permissions: {}
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Inspect pinned public source and rendered links
+        run: |
+          python3 - <<'PY'
+          import io, pathlib, subprocess, sys, tarfile, tempfile, urllib.request, urllib.parse
+          from html.parser import HTMLParser
+          sha = '27cea875448c284673037499ae75b185dd0357c1'
+          req = urllib.request.Request(f'https://api.github.com/repos/pierce403/deanpierce.net/tarball/{sha}', headers={'User-Agent': 'site-correction-audit'})
+          with urllib.request.urlopen(req, timeout=60) as response:
+              data = response.read(100 * 1024 * 1024 + 1)
+          assert len(data) <= 100 * 1024 * 1024
+          with tempfile.TemporaryDirectory() as temp:
+              temp = pathlib.Path(temp)
+              with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as archive:
+                  archive.extractall(temp, filter='data')
+              root = next(temp.iterdir())
+              subprocess.run([sys.executable, '-m', 'venv', str(temp/'venv')], check=True)
+              py = str(temp/'venv/bin/python')
+              subprocess.run([py, '-m', 'pip', 'install', '-q', '-r', str(root/'requirements.txt')], check=True)
+              subprocess.run([py, '-m', 'mkdocs', 'build', '--strict'], cwd=root, check=True)
+              site = root/'site'
+              class Links(HTMLParser):
+                  def __init__(self):
+                      super().__init__(); self.links=[]; self.ids=set()
+                  def handle_starttag(self,tag,attrs):
+                      a=dict(attrs)
+                      if 'id' in a: self.ids.add(a['id'])
+                      if tag in ('a','link') and a.get('href'): self.links.append((tag,'href',a['href']))
+                      if tag in ('img','script','iframe','video','audio','source') and a.get('src'): self.links.append((tag,'src',a['src']))
+              parsed={}
+              for p in site.rglob('*.html'):
+                  q=Links(); q.feed(p.read_text()); parsed[p]=q
+              broken=[]
+              for page,p in parsed.items():
+                  for tag,attr,value in p.links:
+                      u=urllib.parse.urlsplit(value)
+                      if u.scheme or u.netloc or value.startswith(('data:', 'mailto:', 'javascript:')): continue
+                      path=urllib.parse.unquote(u.path)
+                      target=(site/path.lstrip('/')) if path.startswith('/') else (page.parent/path if path else page)
+                      target=target.resolve()
+                      if target.is_dir(): target=target/'index.html'
+                      if not target.exists(): broken.append((str(page.relative_to(site)),tag,value,'missing file'))
+                      elif u.fragment and target in parsed and urllib.parse.unquote(u.fragment) not in parsed[target].ids:
+                          broken.append((str(page.relative_to(site)),tag,value,'missing fragment'))
+              print('=== BROKEN LOCAL REFERENCES ===', flush=True)
+              for item in sorted(set(broken)): print(item, flush=True)
+              print('=== NON-VENDORED JAVASCRIPT FILES ===', flush=True)
+              for p in (root/'docs').rglob('*.js'):
+                  if p.stat().st_size < 10000 and 'vendor' not in str(p):
+                      print(str(p.relative_to(root)),p.stat().st_size,flush=True)
+              print('=== SMALL CONTENT PAGES ===', flush=True)
+              for p in (root/'docs').rglob('*.md'):
+                  if p.stat().st_size < 1000:
+                      print(str(p.relative_to(root)), '\n'+p.read_text(),flush=True)
+          PY
