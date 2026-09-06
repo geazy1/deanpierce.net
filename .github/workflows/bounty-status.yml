@@ -1,0 +1,44 @@
+name: Bounty status monitor (every 3 hours)
+on:
+  schedule:
+    - cron: '17 */3 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/bounty-status.yml'
+      - '.bounty-monitor/check_bounties.py'
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  checks: read
+  statuses: read
+  actions: read
+concurrency:
+  group: bounty-status-monitor
+  cancel-in-progress: false
+jobs:
+  monitor:
+    if: github.repository == 'geazy1/deanpierce.net'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Download and verify the pinned monitor, not PR code
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, pathlib, re, urllib.request
+          sha = os.environ['GITHUB_SHA']
+          assert re.fullmatch(r'[0-9a-f]{40}', sha)
+          url = f'https://raw.githubusercontent.com/geazy1/deanpierce.net/{sha}/.bounty-monitor/check_bounties.py'
+          with urllib.request.urlopen(url, timeout=25) as response:
+              data = response.read(100000)
+          assert hashlib.sha256(data).hexdigest() == '853c6bec5023aef24bb1ae75fc4f5462b7e250d2875db1c42db569ed70da322b'
+          pathlib.Path('/tmp/check_bounties.py').write_bytes(data)
+          PY
+      - name: Test monitor logic offline
+        run: python3 /tmp/check_bounties.py --self-test
+      - name: Review current submission status
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 /tmp/check_bounties.py
