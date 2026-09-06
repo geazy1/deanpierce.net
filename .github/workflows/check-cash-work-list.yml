@@ -1,0 +1,35 @@
+name: Inspect public cash-work lists
+on:
+  push:
+    branches: [research/independent-cash-work]
+    paths: ['.github/workflows/check-cash-work-list.yml']
+permissions: {}
+jobs:
+  inspect:
+    if: github.repository == 'geazy1/deanpierce.net'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Read publicly listed work only
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request, urllib.error
+          urls=['https://botbounty-production.up.railway.app/api/agent/bounties?minAmount=10&limit=20',
+                'https://gitpay.me/tasks/list']
+          for url in urls:
+              print('SOURCE',url,flush=True)
+              try:
+                  req=urllib.request.Request(url,headers={'User-Agent':'public-cash-work-research','Accept':'application/json'})
+                  with urllib.request.urlopen(req,timeout=25) as r: data=r.read(2_000_001)
+                  if len(data)>2_000_000: raise ValueError('Response too large')
+                  obj=json.loads(data)
+                  if isinstance(obj,list):
+                      print('COUNT',len(obj),flush=True)
+                      for row in obj:
+                          out={k:row[k] for k in ['id','title','url','status','value','amount','currency','funded','paid','assigned','assigned_id','deadline','createdAt','updatedAt','name','description','acceptanceCriteria','funding_tx','escrow_address'] if k in row}
+                          print(json.dumps(out,ensure_ascii=True),flush=True)
+                      if obj: print('FIELDS',list(obj[0]),flush=True)
+                  else: print(json.dumps(obj,ensure_ascii=True)[:40000],flush=True)
+              except urllib.error.HTTPError as e: print('HTTP',e.code,flush=True)
+              except Exception as e: print('READ_FAILURE',type(e).__name__,flush=True)
+          PY
