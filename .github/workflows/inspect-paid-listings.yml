@@ -1,0 +1,40 @@
+name: Inspect public paid-work listings
+on:
+  push:
+    branches: [research/independent-cash-work]
+    paths: ['.github/workflows/inspect-paid-listings.yml']
+permissions: {}
+jobs:
+  inspect:
+    if: github.repository == 'geazy1/deanpierce.net'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Read public listing data
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request, urllib.error
+          urls = [
+            'https://superteam.fun/api/listings/live?take=60',
+            'https://superteam.fun/api/agents/listings/live?take=40',
+          ]
+          for url in urls:
+              print('PUBLIC_SOURCE', url, flush=True)
+              try:
+                  req = urllib.request.Request(url, headers={'User-Agent': 'public-paid-work-research', 'Accept':'application/json'})
+                  with urllib.request.urlopen(req, timeout=25) as r:
+                      raw = r.read(2_000_001)
+                  if len(raw)>2_000_000: raise ValueError('Response too large')
+                  data=json.loads(raw)
+                  if isinstance(data, list):
+                      print('LISTINGS_COUNT',len(data),flush=True)
+                      for row in data:
+                          allowed=['id','slug','title','type','status','deadline','rewardAmount','token','rewards','region','eligibility','agentEligibility','agentAccess','isAgentAllowed','isAgentOnly','isPublished','isActive','isArchived','sponsor','description','requirements','applicationType','compensationType','isWinnersAnnounced','totalSubmissions']
+                          print(json.dumps({k:row[k] for k in allowed if k in row},ensure_ascii=True)[:16000],flush=True)
+                      if data: print('AVAILABLE_FIELDS', list(data[0]),flush=True)
+                  else: print(json.dumps(data,ensure_ascii=True)[:100000],flush=True)
+              except urllib.error.HTTPError as e:
+                  print('HTTP_STATUS',e.code,'No authenticated access attempted.',flush=True)
+              except Exception as e:
+                  print('FETCH_FAILED',type(e).__name__,str(e)[:200],flush=True)
+          PY
